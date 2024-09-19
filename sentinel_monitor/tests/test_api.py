@@ -142,3 +142,35 @@ def test_yield_prediction(self):
     prediction = self.ml_service.predict_yield(processed_image)
     self.assertIsInstance(prediction, float)
     self.assertGreater(prediction, 0)
+
+def test_validate_weather_data_valid(client):
+    valid_data = {
+        "temperature": 25.5,
+        "atmospheric_pressure": 1013.25,
+        "humidity": 60,
+        "wind_speed": 5.5,
+        "solar_radiation": 800,
+        "filled_data": 0
+    }
+    response = client.post("/validate-weather-data", json=valid_data)
+    assert response.status_code == 200
+    assert response.json() == valid_data
+
+def test_validate_weather_data_invalid(client):
+    invalid_data = {
+        "temperature": -300,  # Temperatura abaixo do zero absoluto
+        "atmospheric_pressure": 1013.25,
+        "humidity": 60,
+        "wind_speed": 5.5,
+        "solar_radiation": 800,
+        "filled_data": 0
+    }
+    response = client.post("/validate-weather-data", json=invalid_data)
+    assert response.status_code == 400
+    assert "A temperatura não pode ser menor que o zero absoluto" in response.json()["detail"]
+
+def test_redis_connection_error(client, mocker):
+    mocker.patch("SAT.sentinel_monitor.src.api.main.check_redis_connection", side_effect=RedisConnectionError("Erro de conexão"))
+    response = client.get("/status")
+    assert response.status_code == 503
+    assert "Serviço temporariamente indisponível" in response.json()["message"]
