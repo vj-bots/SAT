@@ -1,4 +1,4 @@
-from .auth_router import router as auth_router
+from .auth_router import router as auth_router, get_current_user
 from .feedback_router import router as feedback_router
 from .monitor_router import router as monitor_router
 from .crop_biomass_router import router as crop_biomass_router

@@ -1,3 +1,0 @@
-#!c:\users\jonas\desktop\jobs-studies\prog\sat\venv\scripts\python.exe
-from numba.pycc import main
-main()

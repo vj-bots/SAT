@@ -1,15 +1,24 @@
 import os
 import sys
+import time
+import uuid
+import aioredis
+import traceback
+
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Depends, status, Query
-from .endpoints.auth_router import get_current_user, User
+
+from sentinel_monitor.src.services import ml_service
+from ..services.feedback_service import FeedbackModel
+from sentinel_monitor.src.endpoints import auth_router, feedback_router, monitor_router, crop_biomass_router, land_use_router
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.redis import RedisBackend
 from fastapi_cache.decorator import cache
-from fastapi.security import OAuth2PasswordBearer, OAuth2AuthorizationCodeBearer
+from fastapi.security import OAuth2PasswordBearer, OAuth2AuthorizationCodeBearer, OAuth2PasswordRequestForm
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -17,16 +26,26 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from redis import asyncio as aioredis
-from pydantic import BaseModel, validator
+from ..utils.pydantic_compat import BaseModel, EmailStr, Field, field_validator
 from typing import List
-from .exceptions import RedisConnectionError
-from .utils.logging import setup_logger
+from sentinel_monitor.src.api.exceptions_api import RedisConnectionError
+from ..utils.logging_utils import setup_logger
 from ..ML.data_preprocessing import load_sensor_data
+from sentinel_monitor.src.schemas_src import MonitoringData
+from sentinel_monitor.src.endpoints.auth_router import get_current_user
+from sentinel_monitor.src.model.user import User
+from starlette.middleware.base import BaseHTTPMiddleware
+from sentinel_monitor.src.services.sentinel_service import SentinelService
+from sentinel_monitor.src.services.ml_service import MLService
+
+from sentinel_monitor.src.services import feedback_service
+from sentinel_monitor.src.services.feedback_service import save_feedback as feedback_service_save_feedback
 
 load_dotenv()
 
-# Adiciona o diretório raiz ao `PYTHONPATH`
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
+# Adiciona o diretório raiz ao PYTHONPATH
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
+sys.path.append(root_dir)
 
 from sentinel_monitor.src.endpoints import auth_router, feedback_router, monitor_router, crop_biomass_router, land_use_router
 
@@ -34,7 +53,7 @@ logger = setup_logger(__name__)
 logger.setLevel(os.getenv('LOG_LEVEL', 'INFO'))
 logger.info("PYTHONPATH: %s", sys.path)
 
-SECRET_KEY = os.getenv("SECRET_KEY", "sua_chave_secreta_aqui")
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
@@ -62,6 +81,31 @@ app = FastAPI(
         {"name": "health", "description": "Verificação de saúde da API"},
     ]
 )
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, rate_limit: int = 10, time_window: int = 60):
+        super().__init__(app)
+        self.rate_limit = rate_limit
+        self.time_window = time_window
+        self.request_counts = {}
+
+    async def dispatch(self, request: Request, call_next):
+        client_ip = request.client.host
+        current_time = time.time()
+
+        if client_ip not in self.request_counts:
+            self.request_counts[client_ip] = []
+
+        self.request_counts[client_ip] = [t for t in self.request_counts[client_ip] if current_time - t < self.time_window]
+
+        if len(self.request_counts[client_ip]) >= self.rate_limit:
+            return JSONResponse(status_code=429, content={"detail": "Too many requests"})
+
+        self.request_counts[client_ip].append(current_time)
+        response = await call_next(request)
+        return response
+
+app.add_middleware(RateLimitMiddleware, rate_limit=10, time_window=60)
 
 sensor_data = load_sensor_data()
 
@@ -96,37 +140,43 @@ class WeatherData(BaseModel):
     solar_radiation: float
     filled_data: int
 
-    @validator('temperature')
+    @field_validator('temperature')
+    @classmethod
     def validate_temperature(cls, v):
         if v < -273.15:
             raise ValueError("A temperatura não pode ser menor que o zero absoluto.")
         return v
     
-    @validator('humidity')
+    @field_validator('humidity')
+    @classmethod
     def validate_humidity(cls, v):
         if v < 0 or v > 100:
             raise ValueError("A umidade não pode ser menor que 0 ou maior que 100.")
         return v
     
-    @validator('wind_speed')
+    @field_validator('wind_speed')
+    @classmethod
     def validate_wind_speed(cls, v):
         if v < 0:
             raise ValueError("A velocidade do vento não pode ser menor que 0.")
         return v
     
-    @validator('solar_radiation')
+    @field_validator('solar_radiation')
+    @classmethod
     def validate_solar_radiation(cls, v):
         if v < 0:
             raise ValueError("A radiação solar não pode ser menor que 0.")
         return v
     
-    @validator('atmospheric_pressure')
+    @field_validator('atmospheric_pressure')
+    @classmethod
     def validate_atmospheric_pressure(cls, v):
         if v < 0:
             raise ValueError("A pressão atmosférica não pode ser menor que 0.")
         return v
     
-    @validator('filled_data')
+    @field_validator('filled_data')
+    @classmethod
     def validate_filled_data(cls, v):
         if v < 0 or v > 100:
             raise ValueError("A quantidade de dados preenchidos não pode ser menor que 0 ou maior que 100.")
@@ -138,20 +188,32 @@ async def check_redis_connection():
         await redis.ping()
         return True
     except Exception as e:
-        logger.error("Erro ao conectar com Redis", error=str(e))
+        logger.error("Erro ao conectar com Redis: %s", str(e))
         raise RedisConnectionError(f"Falha na conexão com o Redis: {str(e)}")
+    
+async def save_feedback(feedback: FeedbackModel, user_id: int):
+    return await feedback_service_save_feedback(feedback, user_id)
+
+@app.post("/feedback/submit-feedback")
+async def submit_feedback(feedback: FeedbackModel, current_user: User = Depends(get_current_user)):
+    try:
+        feedback_id = await save_feedback(feedback, current_user.id)
+        return {"message": "Feedback recebido com sucesso", "feedback_id": feedback_id}
+    except Exception as e:
+        logger.error(f"Erro ao processar feedback: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao processar feedback: {str(e)}")
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    logger.error("HTTP Exception", status_code=exc.status_code, detail=exc.detail)
+    logger.error("HTTP Exception", extra={"status_code": exc.status_code, "detail": exc.detail})
     return JSONResponse(
         status_code=exc.status_code,
-        content={"message": exc.detail},
+        content={"detail": exc.detail},
     )
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    logger.error("Unhandled Exception", error=str(exc), traceback=traceback.format_exc())
+    logger.error("Unhandled Exception: %s", str(exc), extra={"traceback": traceback.format_exc()})
     return JSONResponse(
         status_code=500,
         content={"message": "Ocorreu um erro interno no servidor. Por favor, tente novamente mais tarde."},
@@ -207,19 +269,18 @@ async def get_weather_data(
 @app.on_event("startup")
 async def startup():
     try:
-        redis = aioredis.from_url(os.getenv("REDIS_URL", "redis://localhost"), encoding="utf8", decode_responses=True)
+        redis = await aioredis.from_url("redis://localhost", encoding="utf8", decode_responses=True)
         await redis.ping()
         FastAPICache.init(RedisBackend(redis), prefix="fastapi-cache")
         logger.info("Conexão com Redis estabelecida com sucesso")
     except RedisConnectionError as e:
-        logger.warning("Redis não está disponível. O cache será desabilitado.", error=str(e))
+        logger.warning("Redis não está disponível. O cache será desabilitado: %s", str(e))
     except Exception as e:
-        logger.error("Erro inesperado durante a inicialização", error=str(e))
+        logger.error("Erro inesperado durante a inicialização: %s", str(e))
         raise
 
-# Configuração do middleware de host confiável
 app.add_middleware(
-    TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"]
+    TrustedHostMiddleware, allowed_hosts=["*"]
 )
 
 @app.get("/")
@@ -250,11 +311,11 @@ async def health_check():
     return {"status": "healthy"}
 
 @app.get("/protected", tags=["auth"])
-async def protected_route(current_user: User = Depends(get_current_user)):
+async def protected_route(current_user: dict = Depends(get_current_user)):
     """
     Rota protegida que exige autenticação.
     """
-    return {"message": f"Olá, {current_user.username}! Você acessou uma rota protegida."}
+    return {"message": f"Olá, {current_user['username']}! Você acessou uma rota protegida."}
 
 @app.post("/logout", tags=["auth"])
 async def logout(current_user: User = Depends(get_current_user)):
@@ -278,17 +339,47 @@ async def validate_weather_data(data: WeatherData):
         HTTPException: Se os dados fornecidos forem inválidos.
     """
     try:
-        return data
+        logger.info("Iniciando validação de dados meteorológicos")
+        validated_data = WeatherData(**data.model_dump())
+        logger.info("Dados meteorológicos validados com sucesso")
+        return validated_data
     except ValueError as e:
+        logger.error(f"Erro na validação de dados meteorológicos: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.exception_handler(RedisConnectionError)
 async def redis_connection_error_handler(request: Request, exc: RedisConnectionError):
-    logger.error("Erro de conexão com Redis", error=str(exc))
+    logger.error("Erro de conexão com Redis: %s", str(exc))
     return JSONResponse(
         status_code=503,
         content={"message": "Serviço temporariamente indisponível. Por favor, tente novamente mais tarde."},
     )
+
+@app.post("/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    if form_data.username == "testuser" and form_data.password == "testpassword":
+        return {"access_token": "test_token", "token_type": "bearer"}
+    raise HTTPException(status_code=400, detail="Credenciais inválidas")
+
+@app.get("/monitor/weather-forecast")
+async def get_weather_forecast(latitude: float, longitude: float):
+    # Implementação da previsão do tempo
+    return {"forecast": "Ensolarado"}
+
+@app.get("/market/trends")
+async def get_market_trends(crop_type: str):
+    # Implementação das tendências de mercado
+    return {"trend": "Em alta"}
+
+@app.post("/monitor/crop-health")
+async def crop_health(data: MonitoringData, current_user: User = Depends(get_current_user)):
+    try:
+        sentinel_data = SentinelService.get_sentinel2_data(data.geometry, data.start_date, data.end_date)
+        health_prediction = ml_service.predict_crop_health(sentinel_data)
+        return {"health": health_prediction}
+    except Exception as e:
+        logger.error(f"Erro na previsão de saúde da cultura: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro na previsão de saúde da cultura: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

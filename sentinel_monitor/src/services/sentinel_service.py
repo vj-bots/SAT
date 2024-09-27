@@ -3,12 +3,14 @@ import requests
 import os
 from sentinelsat import SentinelAPI
 from fastapi_cache.decorator import cache
+from fastapi import HTTPException
 from datetime import datetime
 from dotenv import load_dotenv
 from sentinelhub import SHConfig
 from .ml_service import MLService
-from .soil_moisture_sensor import SoilMoistureSensor
+from .soil_moisture_sensor_service import SoilMoistureSensor
 from ..utils.logging_utils import setup_logger
+from typing import Dict, Any
 
 logger = setup_logger(__name__)
 
@@ -52,8 +54,7 @@ class SentinelService:
     def get_soil_moisture(self, geometry, start_date, end_date):
         try:
             sentinel1_data = self.get_sentinel1_data(geometry, start_date, end_date)
-            # Aqui você deve implementar a lógica para calcular a umidade do solo
-            # usando os dados do Sentinel-1. Por enquanto, vamos retornar um valor simulado.
+            # implementar logica para detecção de umidade
             return {"moisture_level": "medium", "value": 0.5}
         except Exception as e:
             logger.error(f"Erro ao obter umidade do solo: {str(e)}")
@@ -155,40 +156,35 @@ class SentinelService:
             logger.error(f"Erro inesperado: {str(e)}")
             return {"error": "Ocorreu um erro inesperado"}
 
-    def get_irrigation_advice(self, coordinates):
+    def get_irrigation_advice(self, geometry: dict, start_date: str, end_date: str) -> Dict[str, Any]:
         try:
             analog_value, is_wet = self.soil_sensor.check_soil_moisture()
-            advice = "Irrigação não necessária." if is_wet else "Irrigação recomendada."
-            logger.info(f"Conselho de irrigação gerado para as coordenadas {coordinates}")
-            return advice
+            advice = "Irrigação não necessária." if is_wet else "Irrigação recomendada"
+            logger.info(f"Conselho de irrigação gerado para a geometria {geometry}")
+            return {"message": advice}
         except Exception as e:
             logger.error(f"Erro ao gerar conselho de irrigação: {str(e)}")
-            raise
+            raise HTTPException(status_code=500, detail="Erro ao gerar conselho de irrigação")
 
-    def get_pest_detection(self, coordinates, start_date, end_date):
+    def detect_pests(self, coordinates, start_date, end_date):
         if os.getenv('TEST_MODE') == 'True':
-            return "Nenhuma anomalia significativa detectada."
+            return {"message": "Nenhuma anomalia significativa detectada"}
         try:
             sentinel2_data = self.get_sentinel2_data({"type": "Polygon", "coordinates": [coordinates]}, start_date, end_date)
             pest_prediction = self.ml_service.detect_pests(sentinel2_data)
             logger.info(f"Detecção de pragas realizada para as coordenadas {coordinates}")
-            return f"Probabilidade de pragas: {pest_prediction}"
+            return {"message": f"Probabilidade de pragas: {pest_prediction}"}
         except Exception as e:
             logger.error(f"Erro na detecção de pragas: {str(e)}")
-            return f"Erro na detecção de pragas: {str(e)}"
+            raise HTTPException(status_code=500, detail=f"Erro na detecção de pragas: {str(e)}")
 
-    def get_weather_forecast(self, coordinates):
+    async def get_weather_forecast(self, latitude: float, longitude: float) -> Dict[str, Any]:
         try:
-            forecast = {
-                "temperature": 25.5,
-                "precipitation": 0.2,
-                "wind_speed": 10.3
-            }
-            logger.info(f"Previsão do tempo gerada para as coordenadas {coordinates}")
-            return forecast
+            # Implementar pegar previsão do tempo de forma assíncrona
+            return {"forecast": "Ensolarado", "temperature": 25, "humidity": 60}
         except Exception as e:
             logger.error(f"Erro ao obter previsão do tempo: {str(e)}")
-            raise
+            raise HTTPException(status_code=500, detail="Erro ao obter previsão do tempo")
 
     def get_harvest_advice(self, geometry, start_date, end_date):
         if os.getenv('TEST_MODE') == 'True':
@@ -248,3 +244,8 @@ class SentinelService:
         }
         """
         return self._process_request(geometry, start_date, end_date, evalscript, "SENTINEL-2-L2A")
+
+    def get_sensor_data(self, geometry: dict, start_date: str, end_date: str) -> np.ndarray:
+        # Implementar a lógica para obter dados do sensor
+        # Por enquanto, retorne dados simulados
+        return np.random.rand(10, 5)  # 10 amostras com 5 características cada

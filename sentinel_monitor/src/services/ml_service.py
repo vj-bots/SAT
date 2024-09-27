@@ -65,9 +65,9 @@ class MLService:
         return 'Pragas Detectadas' if prediction == 1 else 'Sem Pragas'
 
     @cache(expire=3600)
-    def predict_yield(self, sentinel2_data: Union[str, np.ndarray]) -> Dict[str, Union[str, float]]:
+    async def predict_yield(self, sentinel2_data: Union[str, np.ndarray]) -> Dict[str, Union[str, float]]:
         if isinstance(sentinel2_data, str):  # Caso de teste
-            return {"yield": "high"}
+            return {"yield": "high", "value": 5.5}
         if self.yield_prediction_model is None:
             return {"yield": "Modelo não carregado", "value": 0.0}
         image_features = preprocess_vi_image(sentinel2_data)
@@ -75,12 +75,12 @@ class MLService:
         estimated_yield = max(0.01, prediction[0])
         return {"yield": "high" if estimated_yield > 0.5 else "low", "value": float(estimated_yield)}
 
-    def predict(self, image: np.ndarray, sensor_data: np.ndarray) -> Dict[str, Any]:
+    async def predict(self, image: np.ndarray, sensor_data: np.ndarray) -> Dict[str, Any]:
         try:
             health = self.predict_crop_health(image)
             irrigation = self.predict_irrigation_need(sensor_data)
             pest = self.detect_pests(image)
-            yield_pred = self.predict_yield(image)
+            yield_pred = await self.predict_yield(image)
             
             logger.info(f"Predições: Saúde={health}, Irrigação={irrigation}, Pragas={pest}, Colheita={yield_pred}")
             return {

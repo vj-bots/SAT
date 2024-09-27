@@ -11,6 +11,7 @@ from .satellite_utils import load_satellite_images
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 import logging
+import cv2
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ def get_project_root():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 def get_data_path(filename):
-    return os.path.abspath(os.path.join(get_project_root(), 'data', filename))
+    return os.path.join(get_project_root(), 'data', filename)
 
 def read_vi_image(file_path):
     with rasterio.open(file_path) as src:
@@ -34,20 +35,23 @@ def normalize(array):
     max_val = np.max(array)
     return (array - min_val) / (max_val - min_val + 1e-8)
 
-def preprocess_vi_image(image_with_moisture):
-    image = image_with_moisture[:-1].reshape(-1, 224, 224, 7)  # Assumindo imagens 224x224 com 7 canais
-    moisture = image_with_moisture[-1]
+def preprocess_vi_image(image):
+    if image.shape != (224, 224, 7):
+        try:
+            image = cv2.resize(image, (224, 224))
+            if image.shape[2] != 7:
+                padding = np.zeros((224, 224, 7 - image.shape[2]))
+                image = np.dstack((image, padding))
+        except Exception as e:
+            logger.error(f"Erro ao redimensionar a imagem: {str(e)}")
+            return None
     
-    processed_images = []
-    for img in image:
-        ndvi = calculate_ndvi(img[:,:,3], img[:,:,2])  # NIR e Red
-        evi = calculate_evi(img[:,:,3], img[:,:,2], img[:,:,0])  # NIR, Red e Blue
-        ndwi = calculate_ndwi(img[:,:,3], img[:,:,1])  # NIR e Green
-        
-        processed_img = np.dstack((img, ndvi, evi, ndwi, np.full_like(ndvi, moisture)))
-        processed_images.append(processed_img)
+    ndvi = calculate_ndvi(image[:,:,3], image[:,:,2])  # NIR e Red
+    evi = calculate_evi(image[:,:,3], image[:,:,2], image[:,:,0])  # NIR, Red e Blue
+    ndwi = calculate_ndwi(image[:,:,3], image[:,:,1])  # NIR e Green
     
-    return np.array(processed_images)
+    processed_img = np.dstack((image, ndvi, evi, ndwi))
+    return processed_img
 
 def preprocess_sensor_data(sensor_data):
     if sensor_data.ndim == 1:
@@ -316,46 +320,6 @@ def create_mock_data():
     y_yield = np.random.rand(100) * 100
     return (X_images, X_sensors), (y_irrigation, y_invasion, y_health, y_yield)
 
-def get_data_path(filename):
-    return os.path.join(get_project_root(), 'data', filename)
-    
-    if not os.path.exists(weather_data_path):
-        logger.warning(f"O diretório {weather_data_path} não existe. Retornando dados simulados.")
-        return pd.DataFrame(np.random.rand(100, 6), columns=['Temperatura', 'Pressão Atmosférica', 'Umidade', 'Velocidade do Vento', 'Radiação Solar', 'Dados Preenchidos'])
-    
-    for state in os.listdir(weather_data_path):
-        state_path = os.path.join(weather_data_path, state)
-        if os.path.isdir(state_path):
-            for file in os.listdir(state_path):
-                if file.endswith('.csv'):
-                    file_path = os.path.join(state_path, file)
-                    try:
-                        df = pd.read_csv(file_path, encoding='latin1', skiprows=1)
-                        logger.info(f"Colunas encontradas no arquivo {file_path}: {df.columns.tolist()}")
-                        
-                        df = df.iloc[:, 5:10]
-                        df.columns = ['Temperatura', 'Pressão Atmosférica', 'Umidade', 'Velocidade do Vento', 'Radiação Solar']
-                        
-                        df = df[pd.to_numeric(df['Temperatura'], errors='coerce').notnull()]
-                        df = df.astype(float)
-                        
-                        df['Dados Preenchidos'] = 0
-                        df.loc[df.isna().any(axis=1), 'Dados Preenchidos'] = 1
-                        
-                        df = df.interpolate(method='linear', limit_direction='both')
-                        
-                        all_data.append(df)
-                    except Exception as e:
-                        logger.error(f"Erro ao carregar o arquivo {file_path}: {str(e)}")
-    
-    if not all_data:
-        logger.warning("Nenhum dado meteorológico encontrado. Retornando dados simulados.")
-        return pd.DataFrame(np.random.rand(100, 6), columns=['Temperatura', 'Pressão Atmosférica', 'Umidade', 'Velocidade do Vento', 'Radiação Solar', 'Dados Preenchidos'])
-    
-    combined_data = pd.concat(all_data, ignore_index=True)
-    logger.info(f"Forma final dos dados combinados: {combined_data.shape}")
-    return combined_data
-
 def combine_image_moisture_data(images, sensor_data):
     combined_data = []
     for i, image in enumerate(images):
@@ -479,7 +443,7 @@ def load_data():
         logger.info(f"Tentando carregar imagens de satélite de: {satellite_images_path}")
         X_images = load_satellite_images(satellite_images_path)
         
-        if X_images is None:
+        if X_images is None or len(X_images) == 0:
             logger.warning("Usando dados de imagem simulados para testes.")
             X_images = np.random.rand(100, 224, 224, 7)
         else:
@@ -508,7 +472,6 @@ def load_data():
         logger.info("Todos os dados foram carregados com sucesso.")
         
         return (X_images, X_sensors), (y_irrigation, y_invasion, y_health, y_yield)
-    
     except Exception as e:
         logger.error(f"Erro ao carregar dados: {str(e)}")
         logger.warning("Usando dados sintéticos para testes.")

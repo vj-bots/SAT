@@ -3,7 +3,7 @@ import sqlite3
 from fastapi import HTTPException
 from passlib.context import CryptContext
 
-from ..services.connection import get_connection
+from ..services.connection_service import get_connection
 
 import string
 import random
@@ -186,3 +186,19 @@ async def forgot_pass(user):
         raise HTTPException(
             status_code=500,
             detail="Falha ao atualizar a senha do usuário no banco de dados.")
+
+async def get_user(username: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT id, username, email FROM users WHERE username = ?', (username,))
+        user = cursor.fetchone()
+        if user:
+            return user
+        else:
+            return None
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar usuário: {str(e)}") from e
+    finally:
+        cursor.close()
+        conn.close()

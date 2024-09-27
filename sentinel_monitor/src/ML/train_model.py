@@ -5,7 +5,7 @@ from .data_preprocessing import preprocess_vi_image, preprocess_sensor_data, loa
 
 def create_model(input_shape_images, input_shape_sensors):
     image_input = tf.keras.Input(shape=input_shape_images)
-    x = tf.keras.layers.Conv3D(32, (3, 3, 3), activation='relu', padding='same')(image_input)
+    x = tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same')(image_input)
     x = tf.keras.layers.Conv3D(64, (3, 3, 3), activation='relu', padding='same')(x)
     x = tf.keras.layers.GlobalAveragePooling3D()(x)
     x = tf.keras.layers.Dense(64, activation='relu')(x)

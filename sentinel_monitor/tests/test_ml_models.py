@@ -17,6 +17,7 @@ class TestMLModels(unittest.TestCase):
         self.y_irrigation = np.random.rand(100)
         self.y_invasion = np.random.randint(0, 2, 100)
         self.y_yield = np.random.rand(100)
+        self.mock_data = (np.random.rand(10, 224, 224, 3), np.random.rand(10, 5))
 
     def test_train_crop_health_model(self):
         X_images_flat = self.X_images.reshape(self.X_images.shape[0], -1)
