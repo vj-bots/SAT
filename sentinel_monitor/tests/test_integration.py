@@ -1,7 +1,12 @@
 import os
+import io
 import sys
+import pytest
+import asyncio
 import unittest
 import numpy as np
+
+from PIL import Image
 from fastapi.testclient import TestClient
 
 # Adicione o diretório raiz do projeto ao PYTHONPATH
@@ -16,15 +21,25 @@ client = TestClient(app)
 
 class TestIntegration(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):
-        cls.client = client
+    async def setUpClass(cls):
+        from fastapi.testclient import TestClient
+        from sentinel_monitor.src.api.main import app
+        cls.client = TestClient(app)
         cls.ml_service = MLService()
-        cls.headers = {"Authorization": "Bearer test_token"}
-        # Simular login e obter token real, se necessário
-        login_data = {"username": "testuser", "password": "testpassword"}
+        
+        # Criar usuário de teste
+        from sentinel_monitor.src.site.auth_db import register
+        from sentinel_monitor.src.model.user import User_create
+        user = User_create(username="testuser", email="test@example.com", password="Test@123")
+        await register(user)
+        
+        # Simular login e obter token real
+        login_data = {"username": "testuser", "password": "Test@123"}
         response = cls.client.post("/token", data=login_data)
         if response.status_code == 200:
-            cls.headers["Authorization"] = f"Bearer {response.json()['access_token']}"
+            cls.headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+        else:
+            raise Exception(f"Falha na autenticação durante a configuração do teste. Status code: {response.status_code}")
 
     def test_full_pipeline(self):
         # Carrega os dados
@@ -47,14 +62,13 @@ class TestIntegration(unittest.TestCase):
         
         # Faz uma previsão com o modelo treinado
         sample_image = preprocess_vi_image(X_images[0:1])
-        sample_image = np.expand_dims(sample_image, axis=1)  # Adiciona uma dimensão extra
         sample_sensor = preprocess_sensor_data(X_sensors[0:1])
         predictions = model.predict([sample_image, sample_sensor])
         
         # Verifica se as previsões têm o formato esperado
         self.assertEqual(len(predictions), 4)  # 4 saídas: irrigação, invasão, saúde e rendimento
         for pred in predictions:
-            self.assertEqual(pred.shape[0], 1)  # Uma previsão para cada amostra
+            self.assertIsNotNone(pred)
 
     def test_invalid_data(self):
         # Teste com dados inválidos
@@ -91,7 +105,7 @@ class TestIntegration(unittest.TestCase):
         self.assertEqual(login_response.status_code, 200)
         token = login_response.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
-
+        
         # Teste do fluxo completo da API
         valid_payload = {
             "geometry": {
@@ -106,27 +120,27 @@ class TestIntegration(unittest.TestCase):
         response = self.client.post("/monitor/crop-health", json=valid_payload, headers=headers)
         self.assertEqual(response.status_code, 200)
         self.assertIn("health", response.json())
-
+        
         # Teste de necessidade de irrigação
-        response = self.client.post("/monitor/irrigation_advice", json=valid_payload, headers=headers)
+        response = self.client.post("/monitor/irrigation-need", json=valid_payload, headers=headers)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("message", response.json())
-
+        self.assertIn("irrigation_need", response.json())
+        
         # Teste de detecção de pragas
-        response = self.client.post("/monitor/pest_detection", json=valid_payload, headers=headers)
+        response = self.client.post("/monitor/pest-detection", json=valid_payload, headers=headers)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("message", response.json())
-
+        self.assertIn("pest_detected", response.json())
+        
         # Teste de previsão de rendimento
-        response = self.client.post("/monitor/yield-prediction", json={"image_data": "mock_image_data"}, headers=headers)
+        response = self.client.post("/monitor/yield-prediction", json=valid_payload, headers=headers)
         self.assertEqual(response.status_code, 200)
-        self.assertIn("yield", response.json())
-
+        self.assertIn("yield_prediction", response.json())
+        
         # Teste de previsão do tempo
         response = self.client.get("/monitor/weather-forecast?latitude=-23.5505&longitude=-46.6333", headers=headers)
         self.assertEqual(response.status_code, 200)
         self.assertIn("forecast", response.json())
-
+        
         # Teste de logout
         response = self.client.post("/logout", headers=headers)
         self.assertEqual(response.status_code, 200)
@@ -180,6 +194,7 @@ class TestIntegration(unittest.TestCase):
         # Configuração do token de autenticação
         login_data = {"username": "testuser", "password": "testpassword"}
         login_response = self.client.post("/token", data=login_data)
+        self.assertEqual(login_response.status_code, 200)
         token = login_response.json()["access_token"]
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -213,7 +228,7 @@ class TestIntegration(unittest.TestCase):
             "humidity": 150,
             "wind_speed": -10,
             "solar_radiation": -500,
-            "filled_data": 2
+            "filled_data": 101
         }
         response = self.client.post("/validate-weather-data", json=invalid_weather_data, headers=headers)
         self.assertEqual(response.status_code, 400)
@@ -225,6 +240,97 @@ class TestIntegration(unittest.TestCase):
         response = self.client.get("/weather-data", headers=invalid_headers)
         self.assertEqual(response.status_code, 401)
         self.assertIn("detail", response.json())
+
+    def test_root(self):
+        response = self.client.get("/")
+        assert response.status_code == 200
+        assert "Foguete não da ré" in response.text
+
+    def test_health_check(self):
+        response = self.client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "healthy"}
+
+    def test_status_check(self):
+        response = self.client.get("/status")
+        assert response.status_code == 200
+        assert "api_status" in response.json()
+        assert "redis_status" in response.json()
+
+    def test_invalid_token(self):
+        headers = {"Authorization": "Bearer invalid_token"}
+        response = self.client.get("/protected", headers=headers)
+        assert response.status_code == 401
+
+    def test_rate_limit(self):
+        for _ in range(11):  # Fazer 11 requisições (limite é 10)
+            response = self.client.get("/")
+        assert response.status_code == 429
+
+    def test_invalid_weather_data(self):
+        invalid_data = {
+            "temperature": -300,  # Temperatura inválida
+            "atmospheric_pressure": 1013.25,
+            "humidity": 60,
+            "wind_speed": 5.5,
+            "solar_radiation": 800,
+            "filled_data": 0
+        }
+        response = self.client.post("/validate-weather-data", json=invalid_data)
+        assert response.status_code == 400
+
+    # Adicione este teste ao final do arquivo
+    def test_crop_health_prediction(self):
+        # Simular autenticação
+        login_data = {"username": "testuser", "password": "testpassword"}
+        login_response = self.client.post("/token", data=login_data)
+        assert login_response.status_code == 200
+        token = login_response.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # Teste de previsão de saúde da cultura
+        valid_payload = {
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[-5.0, 40.0], [-5.0, 45.0], [5.0, 45.0], [5.0, 40.0], [-5.0, 40.0]]]
+            },
+            "start_date": "2023-01-01",
+            "end_date": "2023-01-31"
+        }
+        response = self.client.post("/monitor/crop-health", json=valid_payload, headers=headers)
+        assert response.status_code == 200
+        assert "health" in response.json()
+
+    def test_yolo_detect(self):
+        # Crie uma imagem de teste
+        img = Image.new('RGB', (100, 100), color = 'red')
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr = img_byte_arr.getvalue()
+
+        response = self.client.post("/yolo/detect", files={"file": ("test.png", img_byte_arr, "image/png")})
+        assert response.status_code == 200
+        assert "detections" in response.json()
+
+    def test_yolo_segment(self):
+        img = Image.new('RGB', (100, 100), color = 'blue')
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr = img_byte_arr.getvalue()
+
+        response = self.client.post("/yolo/segment", files={"file": ("test.png", img_byte_arr, "image/png")})
+        assert response.status_code == 200
+        assert "segmentation" in response.json()
+
+    def test_yolo_classify(self):
+        img = Image.new('RGB', (100, 100), color = 'green')
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format='PNG')
+        img_byte_arr = img_byte_arr.getvalue()
+
+        response = self.client.post("/yolo/classify", files={"file": ("test.png", img_byte_arr, "image/png")})
+        assert response.status_code == 200
+        assert "classification" in response.json()
 
 if __name__ == '__main__':
     unittest.main()

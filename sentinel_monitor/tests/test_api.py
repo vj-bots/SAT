@@ -72,6 +72,13 @@ def app_without_rate_limit():
 def client_without_rate_limit(app_without_rate_limit):
     return TestClient(app_without_rate_limit)
 
+@pytest.fixture(scope="module", autouse=True)
+def setup_test_user():
+    from sentinel_monitor.src.site.auth_db import register
+    from sentinel_monitor.src.model.user import User_create
+    user = User_create(username="testuser", email="test@example.com", password="Test@password123")
+    register(user)
+
 def test_rate_limiting(client, mock_sentinel_service, mock_ml_service, auth_headers):
     for i in range(12):
         response = client.get("/monitor/weather-forecast?latitude=-23.5505&longitude=-46.6333", headers=auth_headers)

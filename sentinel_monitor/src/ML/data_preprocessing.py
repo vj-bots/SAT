@@ -1,5 +1,6 @@
 import os
 import sys
+import requests
 import rasterio
 import pandas as pd
 import numpy as np
@@ -7,11 +8,13 @@ from PIL import Image
 from numba import jit
 import sentinelhub
 from sentinelhub import SHConfig, DataCollection, SentinelHubRequest, BBox, CRS, MimeType
-from .satellite_utils import load_satellite_images
+from .satellite_utils import load_satellite_images, calculate_evi, calculate_ndvi, calculate_ndwi
 from sklearn.cluster import KMeans
 import matplotlib.pyplot as plt
 import logging
 import cv2
+from tqdm import tqdm
+import zipfile
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -149,18 +152,6 @@ def process_sentinel2_data(data):
     processed_data = np.stack([blue, green, red, nir, ndvi, evi, ndwi], axis=-1)
     
     return processed_data
-
-@jit(nopython=True)
-def calculate_ndvi(nir, red):
-    return (nir - red) / (nir + red + 1e-8)
-
-@jit(nopython=True)
-def calculate_evi(nir, red, blue):
-    return 2.5 * ((nir - red) / (nir + 6 * red - 7.5 * blue + 1))
-
-@jit(nopython=True)
-def calculate_ndwi(nir, green):
-    return (green - nir) / (green + nir + 1e-8)
 
 def calculate_statistics(array):
     if array.size == 0:
@@ -438,41 +429,137 @@ def visualize_data_distribution(data):
 
 def load_data():
     try:
-        # Carregando imagens de satélite
+        # Carregando imagens de satélite e dados de sensores (código existente)
         satellite_images_path = get_data_path('satellite_images')
-        logger.info(f"Tentando carregar imagens de satélite de: {satellite_images_path}")
         X_images = load_satellite_images(satellite_images_path)
-        
-        if X_images is None or len(X_images) == 0:
-            logger.warning("Usando dados de imagem simulados para testes.")
-            X_images = np.random.rand(100, 224, 224, 7)
-        else:
-            logger.info(f"Imagens de satélite carregadas com sucesso. Forma: {X_images.shape}")
-        
-        # Carregando dados de sensores
         X_sensors = load_sensor_data()
-
-        # Carregando dados de rótulos
+        
+        # Carregando novos datasets
+        agriculture_vision_data = load_agriculture_vision_data()
+        plantdoc_data = load_plantdoc_data()
+        deepweeds_data = load_deepweeds_data()
+        crop_weed_data = load_crop_weed_data()
+        plant_seedlings_data = load_plant_seedlings_data()
+        fruit_detection_data = load_fruit_detection_data()
+        uav_images_data = load_uav_images_data()
+        roboflow_data = load_roboflow_data()
+        
+        # Combine os novos dados com os existentes
+        X_combined = np.concatenate([X_images, agriculture_vision_data, plantdoc_data, deepweeds_data, 
+                                     crop_weed_data, plant_seedlings_data, fruit_detection_data, 
+                                     uav_images_data, roboflow_data], axis=0)
+        
+        # Carregando dados de rótulos (código existente)
         y_irrigation = load_irrigation_data()
         y_invasion = load_invasion_data()
         y_health = load_health_data()
         y_yield = load_yield_data()
-
+        
         # Garantindo que todos os dados tenham o mesmo número de amostras
-        min_samples = min(len(X_images), len(X_sensors), len(y_irrigation), len(y_invasion), len(y_health), len(y_yield))
-        X_images = X_images[:min_samples]
+        min_samples = min(len(X_combined), len(X_sensors), len(y_irrigation), len(y_invasion), len(y_health), len(y_yield))
+        X_combined = X_combined[:min_samples]
         X_sensors = X_sensors[:min_samples]
         y_irrigation = y_irrigation[:min_samples]
         y_invasion = y_invasion[:min_samples]
         y_health = y_health[:min_samples]
         y_yield = y_yield[:min_samples]
-
-        logger.info(f"Forma dos dados de imagem: {X_images.shape}")
+        
+        logger.info(f"Forma dos dados combinados: {X_combined.shape}")
         logger.info(f"Forma dos dados de sensores: {X_sensors.shape}")
         logger.info("Todos os dados foram carregados com sucesso.")
         
-        return (X_images, X_sensors), (y_irrigation, y_invasion, y_health, y_yield)
+        return (X_combined, X_sensors), (y_irrigation, y_invasion, y_health, y_yield)
     except Exception as e:
         logger.error(f"Erro ao carregar dados: {str(e)}")
         logger.warning("Usando dados sintéticos para testes.")
         return create_mock_data()
+    
+def prepare_data_for_yolo(image):
+    # Redimensiona a imagem para o tamanho esperado pelo modelo YOLO
+    resized_image = cv2.resize(image, (640, 640))
+    # Normalização dos valores pixelados
+    normalized_image = resized_image / 255.0
+    return normalized_image
+
+def process_sentinel2_image_for_yolo(image):
+    processed_image = process_sentinel2_image(image)
+    yolo_ready_image = prepare_data_for_yolo(processed_image)
+    return yolo_ready_image
+
+def download_dataset(url, dataset_name):
+    data_dir = os.path.join(get_project_root(), 'data')
+    dataset_dir = os.path.join(data_dir, dataset_name)
+    
+    if not os.path.exists(dataset_dir):
+        os.makedirs(dataset_dir)
+    
+    file_name = url.split('/')[-1]
+    file_path = os.path.join(dataset_dir, file_name)
+    
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    
+    with open(file_path, 'wb') as file, tqdm(
+        desc=dataset_name,
+        total=total_size,
+        unit='iB',
+        unit_scale=True,
+        unit_divisor=1024,
+    ) as progress_bar:
+        for data in response.iter_content(chunk_size=1024):
+            size = file.write(data)
+            progress_bar.update(size)
+    
+    if file_name.endswith('.zip'):
+        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+            zip_ref.extractall(dataset_dir)
+        os.remove(file_path)
+    
+    print(f"{dataset_name} baixado e extraído com sucesso em {dataset_dir}")
+
+def download_all_datasets():
+    datasets = {
+        'Agriculture-Vision': 'https://exemplo.com/agriculture-vision.zip',
+        'PlantDoc': 'https://exemplo.com/plantdoc.zip',
+        'DeepWeeds': 'https://exemplo.com/deepweeds.zip',
+        'Crop_Weed_Field_Image': 'https://exemplo.com/crop_weed_field_image.zip',
+        'Plant_Seedlings': 'https://exemplo.com/plant_seedlings.zip',
+        'Fruit_Detection': 'https://exemplo.com/fruit_detection.zip',
+        'UAV_Agricultural_Images': 'https://exemplo.com/uav_agricultural_images.zip',
+        'Roboflow_Universe': 'https://exemplo.com/roboflow_universe.zip'
+    }
+    
+    for dataset_name, url in datasets.items():
+        download_dataset(url, dataset_name)
+
+def load_agriculture_vision_data():
+    # Implemente o carregamento dos dados do Agriculture-Vision
+    pass
+
+def load_plantdoc_data():
+    # Implemente o carregamento dos dados do PlantDoc
+    pass
+
+def load_deepweeds_data():
+    # Implemente o carregamento dos dados do DeepWeeds
+    pass
+
+def load_crop_weed_data():
+    # Implemente o carregamento dos dados do Crop/Weed Field Image Dataset
+    pass
+
+def load_plant_seedlings_data():
+    # Implemente o carregamento dos dados do Plant Seedlings Dataset
+    pass
+
+def load_fruit_detection_data():
+    # Implemente o carregamento dos dados do Fruit Detection Dataset
+    pass
+
+def load_uav_images_data():
+    # Implemente o carregamento dos dados do UAV-based Agricultural Images Dataset
+    pass
+
+def load_roboflow_data():
+    # Implemente o carregamento dos dados do Roboflow Universe
+    pass

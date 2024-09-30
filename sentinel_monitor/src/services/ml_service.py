@@ -5,11 +5,12 @@ import numpy as np
 from typing import Dict, Any, Union
 from fastapi_cache.decorator import cache
 from fastapi import HTTPException
-from ..ML.data_preprocessing import preprocess_vi_image, preprocess_sensor_data
+from ..ML.data_preprocessing import preprocess_vi_image, preprocess_sensor_data, process_sentinel2_image_for_yolo
 from ..ML.ml_models import predict_crop_health, predict_irrigation, predict_pest_presence, predict_yield
 from ..ML.visualization import plot_ndvi_time_series, plot_yield_prediction
 from sklearn.model_selection import train_test_split
 import tensorflow as tf
+from .yolo_service import yolo_service
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,15 @@ class MLService:
             return {"result": "analysis_data"}
         ndvi_series = np.mean(sentinel2_data[:, :, :], axis=(1, 2))
         return {'mean_ndvi': ndvi_series.tolist()}
+    
+    def detect_objects_yolo(self, image: np.ndarray) -> Dict[str, Any]:
+        try:
+            yolo_ready_image = process_sentinel2_image_for_yolo(image)
+            results = yolo_service.detect_crop_health(yolo_ready_image)
+            return results
+        except Exception as e:
+            logger.error(f"Erro na detecção de objetos com YOLO: {str(e)}")
+            raise HTTPException(status_code=500, detail="Erro na detecção de objetos com YOLO.")
 
 def get_ml_service() -> MLService:
     return MLService()

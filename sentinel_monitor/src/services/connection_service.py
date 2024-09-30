@@ -1,12 +1,12 @@
-import sqlite3
+import aiosqlite
 
-def get_connection():
+DATABASE_URL = "test.db"
+
+async def get_connection():
     """
-    Establishes a connection to the SQLite database.
+    Establishes an asynchronous connection to the SQLite database.
 
     Returns:
-        sqlite3.Connection: A connection object to the database.
+        aiosqlite.Connection: An asynchronous connection object to the database.
     """
-    conn = sqlite3.connect("test.db")
-    return conn
-    # Criar BD
+    return await aiosqlite.connect(DATABASE_URL)

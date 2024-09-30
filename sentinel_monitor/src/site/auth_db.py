@@ -1,5 +1,6 @@
 import sqlite3
 
+import aiosqlite
 from fastapi import HTTPException
 from passlib.context import CryptContext
 
@@ -26,45 +27,38 @@ def verify_password(plain_password, hashed_password):
 # Register Function
 async def register(user):
     hashed_password = get_password_hash(user.password)
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
+    async with aiosqlite.connect(DATABASE_URL) as conn:
+        try:
+            await conn.execute('SELECT * FROM users WHERE email = ?', (user.email,))
+            if await conn.fetchone():
+                raise HTTPException(status_code=400, detail="Email já existe")
 
-        cursor.execute('SELECT * FROM users WHERE email = ?', (user.email, ))
-        if cursor.fetchone():
-            raise HTTPException(status_code=400, detail="Email já existe")
+            await conn.execute('SELECT * FROM users WHERE username = ?', (user.username,))
+            if await conn.fetchone():
+                raise HTTPException(status_code=400, detail="Username já existe")
 
-        cursor.execute('SELECT * FROM users WHERE username = ?',
-                       (user.username, ))
-        if cursor.fetchone():
-            raise HTTPException(status_code=400, detail="Username já existe")
+            await conn.execute(
+                'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
+                (user.username, user.email, hashed_password))
+            await conn.commit()
 
-        cursor.execute(
-            'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
-            (user.username, user.email, hashed_password))
-        conn.commit()
+            await conn.execute('SELECT * FROM users WHERE email = ?', (user.email,))
+            db_user = await conn.fetchone()
 
-        cursor.execute('SELECT * FROM users WHERE email = ?', (user.email, ))
-        db_user = cursor.fetchone()
-        cursor.close()
-
-        if db_user:
-            return {"message": "Usuário registrado!"}
-        else:
+            if db_user:
+                return {"message": "Usuário registrado!"}
+            else:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Falha ao registrar usuário no banco de dados.")
+        except sqlite3.IntegrityError as e:
+            raise HTTPException(
+                status_code=400,
+                detail="Erro de integridade do banco de dados") from e
+        except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail="Falha ao registrar usuário no banco de dados.")
-    except sqlite3.IntegrityError as e:
-        raise HTTPException(
-            status_code=400,
-            detail="Erro de integridade do banco de dados") from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Falha ao registrar usuário: {str(e)}") from e
-    finally:
-        conn.close()
-
+                detail=f"Falha ao registrar usuário: {str(e)}") from e
 
 # Login Function
 async def login(user):
@@ -95,7 +89,6 @@ async def login(user):
         cursor.close()
         conn.close()
 
-
 #  Generate Token Function
 async def generate_token(user):
     conn = get_connection()
@@ -124,7 +117,6 @@ async def generate_token(user):
     finally:
         cursor.close()
         conn.close()
-
 
 #  Validate Token Function
 async def validate_token(user):
@@ -158,7 +150,6 @@ async def validate_token(user):
     finally:
         cursor.close()
         conn.close()
-
 
 #  Validate Token Function
 async def forgot_pass(user):
@@ -202,3 +193,35 @@ async def get_user(username: str):
     finally:
         cursor.close()
         conn.close()
+
+async def create_users_table():
+    conn = await get_connection()
+    cursor = await conn.cursor()
+    await cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, 
+    username TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL,
+    full_name TEXT,
+    disabled BOOLEAN DEFAULT 0
+    )
+    ''')
+    await conn.commit()
+    await conn.close()
+
+async def authenticate_user(username: str, password: str):
+    conn = await get_connection()
+    cursor = await conn.cursor()
+    try:
+        await cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+        user = await cursor.fetchone()
+        if user and verify_password(password, user[3]):
+            return {"id": user[0], "username": user[1], "email": user[2]}
+        return None
+    except Exception as e:
+        print(f"Erro ao autenticar usuário: {str(e)}")
+        return None
+    finally:
+        await cursor.close()
+        await conn.close()

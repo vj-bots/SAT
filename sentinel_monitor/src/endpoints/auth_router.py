@@ -34,7 +34,7 @@ async def get_current_user(token: str = Depends(verify_token)):
     user_data = await auth_db.get_user(username=token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Usuário não encontrado")
-    return User(id=user_data[0], username=user_data[1], email=user_data[2], full_name=user_data[1], disabled=False)
+    return User(id=user_data[0], username=user_data[1], email=user_data[2], full_name=user_data[3], disabled=user_data[4])
 
 class RegisterRequest(BaseModel):
     username: str

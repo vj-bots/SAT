@@ -344,3 +344,18 @@ async def get_harvest_advice(
     except Exception as e:
         logger.error(f"Erro ao gerar conselho de colheita: {str(e)}")
         raise HTTPException(status_code=500, detail="Erro ao gerar conselho de colheita")
+
+@router.post("/yolo-detection", response_model=dict, responses={500: {"model": ErrorResponse}})
+async def yolo_detection(
+    request: MonitorRequest, 
+    sentinel_service: SentinelService = Depends(get_sentinel_service),
+    ml_service: MLService = Depends(get_ml_service),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        sentinel2_data = await sentinel_service.get_sentinel2_data(request.geometry, request.start_date, request.end_date)
+        yolo_results = ml_service.detect_objects_yolo(sentinel2_data)
+        return {"message": "Detecção YOLO concluída", "results": yolo_results}
+    except Exception as e:
+        logger.error(f"Erro na detecção YOLO: {str(e)}")
+        raise HTTPException(status_code=500, detail="Erro na detecção YOLO")
